@@ -328,6 +328,81 @@ static int sendPacketItem(MQTT_CLIENT* mqtt_client, const unsigned char* data, s
     return result;
 }
 
+static int sendStreamingItem(MQTT_CLIENT* mqtt_client, MQTT_STREAM_GET_NEXT getNextElement, size_t msgLength)
+{
+    int result = 0;
+
+    // Packet header has been send, now start streaming...
+    // max tcp packet size = 1400Bytes, max TLS packet size = 16KBytes
+    const int tcpPacketSize = 1400; // we are most efficient, if we prepare the size of a tcp packet to maximize physical packet size, and send it right away. This is repeated until msgLength is reached.
+
+    // get tcp packet size buffer
+    unsigned long * tcpBuffer = (unsigned long *)malloc(tcpPacketSize);
+    if (tcpBuffer == NULL) {
+        LOG(LOG_ERROR, LOG_LINE, "Failure getting streaming packet buffer");
+        result = __LINE__;
+    } else {
+      // first long is marker 0x99999999
+      tcpBuffer[0] = 0x99999999;
+  		int bytesSent = 4;
+  		int packetLen = 4;
+      // send bytes until msgLength
+  		bool failed = false;
+  		while (bytesSent < msgLength) {
+  			// get next value from stream
+  			if( !failed ) {
+          if( !getNextElement(&tcpBuffer[packetLen/4])) { // data must be delivered by getNextElement in network byte order...
+            // handle failure
+    				failed = true;
+    				if (bytesSent==4) {
+    					// if this happens at the beginning of a msg, fail sending message
+    					LOG(LOG_ERROR, LOG_LINE, "Failure getting next streaming element");
+    					result = __LINE__;
+    					break;
+    				} else {
+    					// continue if there are already some usefull elements in the message.
+    					LOG(LOG_ERROR, LOG_LINE, "Failure getting next streaming element");
+    				}
+          }
+        }
+  			if ( failed ) {
+  				// fill msg with empty value if buffer empty
+  				tcpBuffer[packetLen/4] = 0;
+  			}
+  			packetLen += sizeof(unsigned long);
+  			bytesSent += sizeof(unsigned long);
+  			// send if tcp packet size reached or message finished
+  			if (packetLen >= tcpPacketSize || bytesSent >= msgLength) {
+  				result = xio_send(mqtt_client->xioHandle, (const void*)tcpBuffer, packetLen, NULL, NULL);
+  				if (result != 0)
+  				{
+  					LOG(LOG_ERROR, LOG_LINE, "%d: Failure sending control packet data", result);
+  					result = __LINE__;
+  					break;
+  				}
+  				// TODO: DEBUG ZKU
+  				//os_printf_plus(".");
+  				if (bytesSent < msgLength) {
+  					// TODO: DEBUG ZKU
+  					// package sent -> prepare next packet
+  					packetLen = 0;
+             // give control to os for wifi handling
+            #ifdef ARDUINO_ARCH_ESP8266
+  					     yield();
+            #elif ARDUINO_ARCH_ESP32
+                 vPortYield();
+            #endif
+
+  				}
+  			}
+  		}
+  		free(tcpBuffer);
+  		// TODO: DEBUG ZKU
+  		//if (!result) os_printf_plus("sent\n");
+    }
+    return result;
+}
+
 static void onOpenComplete(void* context, IO_OPEN_RESULT open_result)
 {
     MQTT_CLIENT* mqtt_client = (MQTT_CLIENT*)context;
@@ -527,7 +602,7 @@ static void recvCompleteCallback(void* context, CONTROL_PACKET_TYPE packet, int 
 
                         if (mqtt_client->logTrace)
                         {
-                            trace_log = STRING_construct_sprintf("PUBLISH | IS_DUP: %s | RETAIN: %d | QOS: %s", isDuplicateMsg ? TRUE_CONST : FALSE_CONST, 
+                            trace_log = STRING_construct_sprintf("PUBLISH | IS_DUP: %s | RETAIN: %d | QOS: %s", isDuplicateMsg ? TRUE_CONST : FALSE_CONST,
                                 isRetainMsg ? 1 : 0, ENUM_TO_STRING(QOS_VALUE, qosValue) );
                         }
 
@@ -905,8 +980,10 @@ int mqtt_client_publish(MQTT_CLIENT_HANDLE handle, MQTT_MESSAGE_HANDLE msgHandle
     else
     {
         /*Codes_SRS_MQTT_CLIENT_07_021: [mqtt_client_publish shall get the message information from the MQTT_MESSAGE_HANDLE.]*/
+
         const APP_PAYLOAD* payload = mqttmessage_getApplicationMsg(msgHandle);
-        if (payload == NULL)
+        const APP_STREAMING* streaming = mqttmessage_getApplicationStream(msgHandle);
+        if (payload == NULL && streaming == NULL)
         {
             /*Codes_SRS_MQTT_CLIENT_07_020: [If any failure is encountered then mqtt_client_unsubscribe shall return a non-zero value.]*/
             LOG(LOG_ERROR, LOG_LINE, "Error: mqttmessage_getApplicationMsg failed");
@@ -916,8 +993,12 @@ int mqtt_client_publish(MQTT_CLIENT_HANDLE handle, MQTT_MESSAGE_HANDLE msgHandle
         {
             STRING_HANDLE trace_log = construct_trace_log_handle(mqtt_client);
 
+        	bool isStreaming = mqttmessage_getIsStreaming(msgHandle);
+        	int msgLen = (isStreaming? streaming->length : payload->length);
+        	uint8_t* msg = (isStreaming? NULL : payload->message);
+
             BUFFER_HANDLE publishPacket = mqtt_codec_publish(mqttmessage_getQosType(msgHandle), mqttmessage_getIsDuplicateMsg(msgHandle),
-                mqttmessage_getIsRetained(msgHandle), mqttmessage_getPacketId(msgHandle), mqttmessage_getTopicName(msgHandle), payload->message, payload->length, trace_log);
+                mqttmessage_getIsRetained(msgHandle), mqttmessage_getPacketId(msgHandle), mqttmessage_getTopicName(msgHandle), msg, msgLen, trace_log);
             if (publishPacket == NULL)
             {
                 /*Codes_SRS_MQTT_CLIENT_07_020: [If any failure is encountered then mqtt_client_unsubscribe shall return a non-zero value.]*/
@@ -941,6 +1022,14 @@ int mqtt_client_publish(MQTT_CLIENT_HANDLE handle, MQTT_MESSAGE_HANDLE msgHandle
                     result = 0;
                 }
                 BUFFER_delete(publishPacket);
+
+                //Send streaming data after header is sent
+                if ( isStreaming && sendStreamingItem(mqtt_client, streaming->getNextElement, streaming->length)) {
+                    LOG(LOG_ERROR, LOG_LINE, "Error: mqtt_client_publish send streaming data failed");
+                    result = __LINE__;
+                } else {
+                	result = 0;
+                }
             }
             if (trace_log != NULL)
             {
