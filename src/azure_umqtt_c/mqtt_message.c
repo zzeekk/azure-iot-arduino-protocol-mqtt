@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include "azure_umqtt_c/mqtt_message.h"
+#include "azure_c_shared_utility/optimize_size.h"
 #include "azure_c_shared_utility/gballoc.h"
 
 typedef struct MQTT_MESSAGE_TAG
@@ -48,26 +49,26 @@ MQTT_MESSAGE_HANDLE mqttmessage_create(uint16_t packetId, const char* topicName,
                 result->isStreaming = false;
 
                 /* Codes_SRS_MQTTMESSAGE_07_002: [mqttmessage_create shall allocate and copy the topicName and appMsg parameters.] */
-				result->msg.appPayload.length = appMsgLength;
-				if (result->msg.appPayload.length > 0)
-				{
-					result->msg.appPayload.message = malloc(appMsgLength);
-					if (result->msg.appPayload.message == NULL)
-					{
-						/* Codes_SRS_MQTTMESSAGE_07_003: [If any memory allocation fails mqttmessage_create shall free any allocated memory and return NULL.] */
-						free(result->topicName);
-						free(result);
-						result = NULL;
-					}
-					else
-					{
-						memcpy(result->msg.appPayload.message, appMsg, appMsgLength);
-					}
-				}
-				else
-				{
-					result->msg.appPayload.message = NULL;
-				}
+                result->msg.appPayload.length = appMsgLength;
+                if (result->msg.appPayload.length > 0)
+                {
+                    result->msg.appPayload.message = malloc(appMsgLength);
+                    if (result->msg.appPayload.message == NULL)
+                    {
+                        /* Codes_SRS_MQTTMESSAGE_07_003: [If any memory allocation fails mqttmessage_create shall free any allocated memory and return NULL.] */
+                        free(result->topicName);
+                        free(result);
+                        result = NULL;
+                    }
+                    else
+                    {
+                        (void)memcpy(result->msg.appPayload.message, appMsg, appMsgLength);
+                    }
+                }
+                else
+                {
+                    result->msg.appPayload.message = NULL;
+                }
             }
         }
     }
@@ -263,7 +264,7 @@ int mqttmessage_setIsDuplicateMsg(MQTT_MESSAGE_HANDLE handle, bool duplicateMsg)
     /* Codes_SRS_MQTTMESSAGE_07_022: [If handle is NULL then mqttmessage_setIsDuplicateMsg shall return a non-zero value.] */
     if (handle == NULL)
     {
-        result = __LINE__;
+        result = __FAILURE__;
     }
     else
     {
@@ -281,7 +282,7 @@ int mqttmessage_setIsRetained(MQTT_MESSAGE_HANDLE handle, bool retainMsg)
     /* Codes_SRS_MQTTMESSAGE_07_024: [If handle is NULL then mqttmessage_setIsRetained shall return a non-zero value.] */
     if (handle == NULL)
     {
-        result = __LINE__;
+        result = __FAILURE__;
     }
     else
     {
