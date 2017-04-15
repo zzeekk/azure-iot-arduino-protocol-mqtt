@@ -343,7 +343,7 @@ static BUFFER_HANDLE constructPublishReply(CONTROL_PACKET_TYPE type, uint8_t fla
     return result;
 }
 
-static int constructFixedHeader(BUFFER_HANDLE ctrlPacket, CONTROL_PACKET_TYPE packetType, uint8_t flags)
+static int constructFixedHeaderAdditionalLength(BUFFER_HANDLE ctrlPacket, CONTROL_PACKET_TYPE packetType, uint8_t flags, int additionalMsgLen)
 {
     int result;
     if (ctrlPacket == NULL)
@@ -352,7 +352,7 @@ static int constructFixedHeader(BUFFER_HANDLE ctrlPacket, CONTROL_PACKET_TYPE pa
     }
     else
     {
-        size_t packetLen = BUFFER_length(ctrlPacket);
+        size_t packetLen = BUFFER_length(ctrlPacket) + additionalMsgLen; // additionalMsgLen is used for streaming...
         uint8_t remainSize[4] ={ 0 };
         size_t index = 0;
 
@@ -392,6 +392,11 @@ static int constructFixedHeader(BUFFER_HANDLE ctrlPacket, CONTROL_PACKET_TYPE pa
     }
     return result;
 }
+
+static int constructFixedHeader(BUFFER_HANDLE ctrlPacket, CONTROL_PACKET_TYPE packetType, uint8_t flags) {
+	return constructFixedHeaderAdditionalLength( ctrlPacket, packetType, flags, 0);
+}
+
 
 static int constructConnPayload(BUFFER_HANDLE ctrlPacket, const MQTT_CLIENT_OPTIONS* mqttOptions, STRING_HANDLE trace_log)
 {
@@ -779,18 +784,12 @@ BUFFER_HANDLE mqtt_codec_publish(QOS_VALUE qosValue, bool duplicateMsg, bool ser
             else
             {
                 size_t payloadOffset = BUFFER_length(result);
+                int additionalMsgLen = 0;
                 if (buffLen > 0)
                 {
-                    if (BUFFER_enlarge(result, buffLen) != 0)
+                    if (msgBuffer != NULL) // for Streaming msg, msgBuffer is NULL. The result buffer will have payload size set to msgLen, but doesnt contain any data. Data will be read directly from the stream later.
                     {
-                        /* Codes_SRS_MQTT_CODEC_07_006: [If any error is encountered then mqtt_codec_publish shall return NULL.] */
-                        BUFFER_delete(result);
-                        result = NULL;
-                    }
-                    else
-                    {
-                        uint8_t* iterator = BUFFER_u_char(result);
-                        if (iterator == NULL)
+                        if (BUFFER_enlarge(result, buffLen) != 0)
                         {
                             /* Codes_SRS_MQTT_CODEC_07_006: [If any error is encountered then mqtt_codec_publish shall return NULL.] */
                             BUFFER_delete(result);
@@ -798,16 +797,31 @@ BUFFER_HANDLE mqtt_codec_publish(QOS_VALUE qosValue, bool duplicateMsg, bool ser
                         }
                         else
                         {
-                            iterator += payloadOffset;
-                            // Write Message
-                            (void)memcpy(iterator, msgBuffer, buffLen);
-                            if (trace_log)
+                            uint8_t* iterator = BUFFER_u_char(result);
+                            if (iterator == NULL)
                             {
-                                STRING_sprintf(varible_header_log, " | PAYLOAD_LEN: %zu", buffLen);
+                                /* Codes_SRS_MQTT_CODEC_07_006: [If any error is encountered then mqtt_codec_publish shall return NULL.] */
+                                BUFFER_delete(result);
+                                result = NULL;
+                            }
+                            else
+                            {
+                                iterator += payloadOffset;
+                                // Write Message
+                                (void)memcpy(iterator, msgBuffer, buffLen);
+                                if (trace_log)
+                                {
+                                    STRING_sprintf(varible_header_log, " | PAYLOAD_LEN: %zu", buffLen);
+                                }
                             }
                         }
                     }
                 }
+                else
+                {
+                  additionalMsgLen = buffLen; // for streaming, we need the message to carry a payload which isnt yet known...
+                }
+                  
 
                 if (result != NULL)
                 {
@@ -815,7 +829,7 @@ BUFFER_HANDLE mqtt_codec_publish(QOS_VALUE qosValue, bool duplicateMsg, bool ser
                     {
                         (void)STRING_copy(trace_log, "PUBLISH");
                     }
-                    if (constructFixedHeader(result, PUBLISH_TYPE, headerFlags) != 0)
+                    if (constructFixedHeaderAdditionalLength(result, PUBLISH_TYPE, headerFlags, additionalMsgLen) != 0)
                     {
                         /* Codes_SRS_MQTT_CODEC_07_006: [If any error is encountered then mqtt_codec_publish shall return NULL.] */
                         BUFFER_delete(result);
